@@ -22,7 +22,7 @@ load_dotenv()
 
 st.set_page_config(page_title="Liquidity Risk Analysis Dashboard", layout="wide")
 st.image("treasury_header.jpg", caption="Liquidity Risk Dashboard", width=400)
-st.title("dY Liquidity Risk Analysis Dashboard")
+st.title("💰 Liquidity Risk Analysis Dashboard")
 st.markdown(
     """
     Upload your files and provide an objective to generate a professional liquidity risk report.
@@ -37,12 +37,12 @@ objective = st.text_area(
 )
 
 uploaded_files = st.file_uploader(
-    "Upload Files (Excel recommended)",
+    "📂 Upload Files (Excel recommended)",
     accept_multiple_files=True,
     help="Upload Excel, CSV, TSV, or JSON files."
 )
 
-if st.button("Analyse", key="analyse"):
+if st.button("🚀 Analyse", key="analyse"):
     if not uploaded_files:
         st.error("Upload at least one file.")
     else:
