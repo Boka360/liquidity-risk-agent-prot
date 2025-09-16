@@ -398,32 +398,94 @@ def chart_generation_tool(chart_spec: Dict[str, Any]) -> Dict[str, str]:
         datasets = chart_spec.get('datasets', [])
         title = chart_spec.get('meta', {}).get('title', name.replace('_', ' ').title())
 
+        if isinstance(labels, (pd.Series, pd.Index)):
+            labels = labels.tolist()
+        elif hasattr(labels, 'tolist') and not isinstance(labels, list):
+            labels = labels.tolist()
+        elif isinstance(labels, tuple):
+            labels = list(labels)
+        elif not isinstance(labels, list):
+            labels = [labels] if labels else []
+        labels = [str(l) for l in labels]
+
+        cleaned_datasets = []
+        max_data_len = 0
+        for ds in datasets or []:
+            data_values = ds.get('data', [])
+            if isinstance(data_values, (pd.Series, pd.Index)):
+                data_list = data_values.tolist()
+            elif hasattr(data_values, 'tolist') and not isinstance(data_values, list):
+                data_list = data_values.tolist()
+            elif isinstance(data_values, (tuple, set)):
+                data_list = list(data_values)
+            elif isinstance(data_values, list):
+                data_list = data_values
+            else:
+                data_list = [data_values]
+            max_data_len = max(max_data_len, len(data_list))
+            cleaned = {**ds}
+            cleaned['label'] = str(cleaned.get('label', 'Series'))
+            cleaned['data'] = data_list
+            cleaned_datasets.append(cleaned)
+
+        if not labels and max_data_len:
+            labels = [str(i + 1) for i in range(max_data_len)]
+        label_count = len(labels)
+
+        pad_value = float('nan')
+        if label_count:
+            for ds in cleaned_datasets:
+                data_list = ds['data']
+                if len(data_list) > label_count:
+                    ds['data'] = data_list[:label_count]
+                elif len(data_list) < label_count:
+                    ds['data'] = data_list + [pad_value] * (label_count - len(data_list))
+        elif cleaned_datasets:
+            label_count = max(len(ds['data']) for ds in cleaned_datasets)
+            labels = [str(i + 1) for i in range(label_count)]
+            for ds in cleaned_datasets:
+                data_list = ds['data']
+                if len(data_list) < label_count:
+                    ds['data'] = data_list + [pad_value] * (label_count - len(data_list))
+
         fig, ax = plt.subplots(figsize=(8,4))
-        if ctype == 'line':
-            for ds in datasets:
-                ax.plot(labels, ds.get('data', []), label=ds.get('label', 'Series'))
-        elif ctype == 'bar':
-            x = range(len(labels))
-            width = 0.8 / max(1, len(datasets))
-            for i, ds in enumerate(datasets):
-                ax.bar([xi + i*width for xi in x], ds.get('data', []), width=width, label=ds.get('label', 'Series'))
-            ax.set_xticks([i + width*(len(datasets)-1)/2 for i in x])
-            ax.set_xticklabels(labels)
+        has_data = False
+
+        if not cleaned_datasets or label_count == 0:
+            ax.text(0.5, 0.5, "No chart data available", ha='center', va='center', fontsize=12)
+            ax.axis('off')
         elif ctype == 'pie':
-            # Use first dataset
-            ds = datasets[0] if datasets else {'data': [], 'label': 'Series'}
-            ax.pie(ds.get('data', []), labels=labels, autopct='%1.1f%%')
+            ds = cleaned_datasets[0]
+            data_pairs = [(lab, val) for lab, val in zip(labels, ds['data']) if pd.notna(val)]
+            if data_pairs:
+                pie_labels, pie_data = zip(*data_pairs)
+                ax.pie(pie_data, labels=pie_labels, autopct='%1.1f%%')
+                has_data = True
+            else:
+                ax.text(0.5, 0.5, "No chart data available", ha='center', va='center', fontsize=12)
+                ax.axis('off')
+        elif ctype == 'bar':
+            x = list(range(len(labels)))
+            width = 0.8 / max(1, len(cleaned_datasets))
+            for i, ds in enumerate(cleaned_datasets):
+                values = [0 if pd.isna(v) else v for v in ds['data']]
+                ax.bar([xi + i * width for xi in x], values, width=width, label=ds['label'])
+            ax.set_xticks([i + width * (len(cleaned_datasets) - 1) / 2 for i in x])
+            ax.set_xticklabels(labels)
+            has_data = True
         elif ctype == 'scatter':
-            for ds in datasets:
-                ax.scatter(labels, ds.get('data', []), label=ds.get('label', 'Series'))
+            for ds in cleaned_datasets:
+                ax.scatter(labels, ds['data'], label=ds['label'])
+            has_data = True
         else:
-            # fallback to line
-            for ds in datasets:
-                ax.plot(labels, ds.get('data', []), label=ds.get('label', 'Series'))
+            for ds in cleaned_datasets:
+                ax.plot(labels, ds['data'], label=ds['label'])
+            has_data = True
 
         ax.set_title(title)
-        ax.legend()
-        ax.grid(alpha=0.2)
+        if has_data and ctype != 'pie':
+            ax.legend()
+            ax.grid(alpha=0.2)
 
         img_b64 = to_base64_png(fig)
         return {name: img_b64}
