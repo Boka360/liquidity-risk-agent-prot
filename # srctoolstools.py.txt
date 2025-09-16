@@ -1,0 +1,300 @@
+# src/tools/tools.py
+from crewai.tools import tool
+from typing import Dict, Any, Union
+from pydantic import BaseModel, Field
+import pandas as pd
+import matplotlib.pyplot as plt
+import io
+import base64
+import os
+import json
+from PyPDF2 import PdfReader
+from docx import Document
+import openpyxl
+from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
+
+class DataIngestionInput(BaseModel):
+    file_path: str = Field(..., description="File path.")
+
+@tool("Data Ingestion Tool")
+def data_ingestion_tool(file_path: str) -> Dict[str, Any]:
+    """Extracts data from Excel, PDF, TXT, or Word files. Input: file_path as string."""
+    if not os.path.exists(file_path):
+        return {'error': f"File not found: {file_path}."}
+    ext = os.path.splitext(file_path)[1].lower()
+    data = {}
+    try:
+        if ext == '.xlsx':
+            wb = openpyxl.load_workbook(file_path)
+            for sheet in wb.sheetnames:
+                df = pd.read_excel(file_path, sheet_name=sheet)
+                data[sheet] = df.to_dict('records')
+        # ... (other formats unchanged)
+        return data
+    except Exception as e:
+        return {'error': f"Ingestion failed: {str(e)}."}
+
+class LiquidityAnalysisInput(BaseModel):
+    data: str = Field(..., description="JSON data.")
+    objective: str = Field(..., description="Objective.")
+
+@tool("Liquidity Analysis Tool")
+def liquidity_analysis_tool(data: str, objective: str) -> Dict[str, Any]:
+    """Analyse extracted date."""
+    try:
+        data_dict = json.loads(data) if isinstance(data, str) else data
+    except json.JSONDecodeError:
+        return {'error': 'Invalid JSON.'}
+
+    if 'error' in data_dict:
+        return data_dict
+
+    results = {'objective': objective, 'metrics': {}, 'tables': {}, 'charts': {}, 'insights': []}
+
+    def to_df(records, sheet_name):
+        try:
+            df = pd.DataFrame(records)
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+            return df if not df.empty else None
+        except:
+            return None
+
+    # FX_Rates
+    fx_rates = None
+    if 'FX_Rates' in data_dict:
+        fx_df = to_df(data_dict['FX_Rates'], 'FX_Rates')
+        if fx_df is not None:
+            fx_rates = fx_df.set_index('Date')
+            results['tables']['fx_rates'] = fx_df.head().to_dict('records')
+            results['insights'].append("FX rates for AUD/USD/EUR/GBP loaded.")
+
+    # Bank_Cash_Daily: FX to AUD, spikes, missing
+    if 'Bank_Cash_Daily' in data_dict:
+        cash_df = to_df(data_dict['Bank_Cash_Daily'], 'Bank_Cash_Daily')
+        if cash_df is not None and fx_rates is not None:
+            # Recompute AUD if needed
+            cash_df['Closing Balance AUD Calc'] = cash_df['Closing Balance'] * cash_df['FX Rate to AUD']
+            total_cash = cash_df['Closing Balance AUD'].sum()
+            spikes = cash_df[cash_df['Closing Balance AUD'] > cash_df['Closing Balance AUD'].mean() * 1.5]
+            missing_days = pd.date_range(cash_df['Date'].min(), cash_df['Date'].max()).difference(cash_df['Date'])
+            results['metrics']['total_cash'] = total_cash
+            results['tables']['cash_daily'] = cash_df.head().to_dict('records')
+            results['insights'].append(f"Total cash (AUD): ${total_cash:,.0f}. {len(spikes)} spikes, {len(missing_days)} missing days.")
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            cash_df.groupby('Date')['Closing Balance AUD'].sum().plot(ax=ax)
+            ax.set_title("Daily Cash Balances (AUD)")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            buf.seek(0)
+            results['charts']['cash_trend'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)
+
+    # Balance_Sheet_Monthly: Ratios
+    if 'Balance_Sheet_Monthly' in data_dict:
+        bs_df = to_df(data_dict['Balance_Sheet_Monthly'], 'Balance_Sheet_Monthly')
+        if bs_df is not None:
+            aggregated = bs_df.groupby('Month').sum(numeric_only=True)
+            latest = aggregated.iloc[-1]
+            current_assets = latest.get('Total Current Assets', 0)
+            current_liabilities = latest.get('Total Liabilities', 0)
+            inventory = latest.get('Inventory', 0)
+            current_ratio = round(current_assets / current_liabilities, 2) if current_liabilities else 0
+            quick_ratio = round((current_assets - inventory) / current_liabilities, 2) if current_liabilities else 0
+            results['metrics'].update({'current_ratio': current_ratio, 'quick_ratio': quick_ratio})
+            results['tables']['balance_sheet'] = aggregated.tail(1).to_dict('records')
+            results['insights'].append(f"Current ratio: {current_ratio}; quick ratio: {quick_ratio}.")
+
+    # Cash_Flow_Monthly: Flows
+    if 'Cash_Flow_Monthly' in data_dict:
+        cf_df = to_df(data_dict['Cash_Flow_Monthly'], 'Cash_Flow_Monthly')
+        if cf_df is not None:
+            net_flow = cf_df[['Operating CF', 'Investing CF', 'Financing CF']].sum()
+            results['tables']['cash_flow'] = net_flow.to_dict()
+            results['insights'].append(f"Net cash: Operating ${net_flow['Operating CF']:,.0f}, Investing ${net_flow['Investing CF']:,.0f}.")
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            net_flow.plot(kind='bar', ax=ax)
+            ax.set_title("Cash Flow Bridge")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            buf.seek(0)
+            results['charts']['cash_flow'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)
+
+    # Debt_Schedule: Maturity, risks
+    if 'Debt_Schedule' in data_dict:
+        debt_df = to_df(data_dict['Debt_Schedule'], 'Debt_Schedule')
+        if debt_df is not None:
+            debt_df['Maturity'] = pd.to_datetime(debt_df['Maturity'])
+            near_term = debt_df[debt_df['Maturity'] < datetime.now() + timedelta(days=365)]
+            results['tables']['debt_schedule'] = debt_df.head().to_dict('records')
+            results['insights'].append(f"{len(near_term)} debts due in 12 months, totaling ${near_term['Outstanding'].sum():,.0f}. Refinancing risk if rates rise.")
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            debt_df.groupby('Maturity')['Outstanding'].sum().plot(kind='bar', ax=ax)
+            ax.set_title("Debt Maturity Ladder")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            buf.seek(0)
+            results['charts']['debt_ladder'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)
+
+    # Investments: Coverage
+    if 'Investments' in data_dict:
+        inv_df = to_df(data_dict['Investments'], 'Investments')
+        if inv_df is not None:
+            liquid_value = inv_df['Amount'].sum()
+            results['metrics']['investment_value'] = liquid_value
+            results['insights'].append(f"Liquid investments: ${liquid_value:,.0f}. Good coverage.")
+
+    # AR/AP_Aging: Mismatches
+    if 'AR_Aging' in data_dict and 'AP_Aging' in data_dict:
+        ar_df = to_df(data_dict['AR_Aging'], 'AR_Aging')
+        ap_df = to_df(data_dict['AP_Aging'], 'AP_Aging')
+        if ar_df is not None and ap_df is not None:
+            ar_total = ar_df['Amount'].sum()
+            ap_total = ap_df['Amount'].sum()
+            ar_overdue = ar_df[ar_df['Days Past Due'] > 30]['Amount'].sum()
+            results['metrics']['ar_ap_net'] = ar_total - ap_total
+            results['insights'].append(f"Net AR-AP: ${ar_total - ap_total:,.0f}. Overdue AR: ${ar_overdue:,.0f}; accelerate collections.")
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            pd.Series({'AR': ar_total, 'AP': ap_total}).plot(kind='pie', ax=ax, autopct='%1.1f%%')
+            ax.set_title("AR vs AP Total")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            buf.seek(0)
+            results['charts']['ar_ap_pie'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)
+
+    # Projections_Monthly: Forecast
+    if 'Projections_Monthly' in data_dict:
+        proj_df = to_df(data_dict['Projections_Monthly'], 'Projections_Monthly')
+        if proj_df is not None:
+            proj_df['Month'] = pd.to_datetime(proj_df['Month'])
+            cash_trend = proj_df['Net Cash Flow'].sum()
+            proj_df['Index'] = range(len(proj_df))
+            model = LinearRegression()
+            model.fit(proj_df[['Index']], proj_df['Net Cash Flow'])
+            future = pd.DataFrame({'Index': [len(proj_df), len(proj_df)+1]})
+            forecast = model.predict(future)
+            results['tables']['projections'] = proj_df.head().to_dict('records')
+            results['insights'].append(f"6-month net cash: ${cash_trend:,.0f}. Forecasted next 2 months: ${forecast[0]:,.0f}, ${forecast[1]:,.0f}.")
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+            proj_df['Net Cash Flow'].plot(ax=ax)
+            ax.set_title("Monthly Cash Projections")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            buf.seek(0)
+            results['charts']['cash_projection'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)
+
+    # Covenants: Compliance
+    if 'Covenants' in data_dict:
+        cov_df = to_df(data_dict['Covenants'], 'Covenants')
+        if cov_df is not None:
+            breaches = cov_df[cov_df['Status'] != 'Compliant']
+            results['tables']['covenants'] = cov_df.to_dict('records')
+            results['insights'].append(f"Covenant breaches: {len(breaches)}. Monitor closely.")
+
+    try:
+        return json.dumps(results)  # <-- ensures valid JSON
+    except Exception as e:
+        return json.dumps({'error': f'Failed to serialize results: {str(e)}'})
+        
+class ChartGenerationInput(BaseModel):
+    """Input for chart generation tool."""
+    chart_data: Union[str, dict] = Field(..., description="JSON or dict containing chart data.")
+    chart_type: str = Field(..., description="Type of chart: bar, line, pie, etc.")
+    title: str = Field("Chart", description="Title of the chart.")
+
+@tool("Chart Generation Tool")
+def chart_generation_tool(chart_type: str, data: dict) -> dict:
+    """
+    Generates charts as base64 images so they can be embedded into Markdown.
+    Args:
+        chart_type: str - type of chart ('bar', 'line', 'pie', etc.)
+        data: dict - input data { 'x': [...], 'y': [...], 'title': '...' }
+    Returns:
+        dict with { chart_name: base64_string }
+    """
+    fig, ax = plt.subplots(figsize=(6,4))
+
+    if chart_type == "bar":
+        ax.bar(data['x'], data['y'])
+    elif chart_type == "line":
+        ax.plot(data['x'], data['y'], marker='o')
+    elif chart_type == "pie":
+        ax.pie(data['y'], labels=data['x'], autopct='%1.1f%%')
+    else:
+        ax.plot(data['x'], data['y'])  # default line chart
+
+    ax.set_title(data.get("title", chart_type.capitalize()))
+
+    buf = io.BytesIO()
+    plt.tight_layout()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+
+    img_base64 = base64.b64encode(buf.read()).decode("utf-8")
+    return {data.get("title", chart_type): img_base64}
+
+class ReportGenerationInput(BaseModel):
+    analysis: str = Field(..., description="JSON analysis.")
+    objective: str = Field(..., description="Objective.")
+
+@tool("Report Generation Tool")
+def report_generation_tool(analysis: str, objective: str) -> str:
+    """Produce comprehensive report based on analysed data."""
+    try:
+        analysis_dict = json.loads(analysis) if isinstance(analysis, str) else analysis
+    except json.JSONDecodeError:
+        return "# Error\nInvalid JSON."
+
+    if 'error' in analysis_dict:
+        return f"# Liquidity Risk Analysis\n\n## Error\n{analysis_dict['error']}"
+
+    report = f"# Liquidity Risk Analysis Report\n\n**Objective**: {objective}\n\n"
+
+    # Executive Summary
+    report += "## Executive Summary\n"
+    for insight in analysis_dict.get('insights', []):
+        report += f"- {insight}\n"
+    report += "\n"
+
+    # Key Ratios
+    report += "## Key Ratios\n| Metric | Value |\n|--------|-------|\n"
+    for k, v in analysis_dict.get('metrics', {}).items():
+        report += f"| {k.replace('_', ' ').title()} | {v:,.2f} |\n"
+    report += "\n"
+
+    # Sections
+    sections = ['fx_rates', 'cash_daily', 'balance_sheet', 'cash_flow', 'debt_schedule', 'investments', 'ar_aging', 'ap_aging', 'projections', 'covenants']
+    for section in sections:
+        if section in analysis_dict.get('tables', {}):
+            report += f"## {section.replace('_', ' ').title()}\n"
+            df = pd.DataFrame(analysis_dict['tables'][section])
+            report += df.to_markdown(index=False) + "\n\n"
+
+    # Charts
+    for chart_name, img_base64 in analysis_dict.get('charts', {}).items():
+        report += f"## {chart_name.replace('_', ' ').title()}\n"
+        report += f"![{chart_name}](data:image/png;base64,{img_base64})\n\n"
+
+    # Risk Assessment
+    report += "## Risk Assessment\n"
+    if analysis_dict['metrics'].get('current_ratio', 0) < 1.5:
+        report += "- Low liquidity: Current ratio below 1.5; secure financing.\n"
+    if 'tables' in analysis_dict and 'debt_schedule' in analysis_dict['tables']:
+        debt_df = pd.DataFrame(analysis_dict['tables']['debt_schedule'])
+        near_term = debt_df[pd.to_datetime(debt_df['Maturity']) < datetime.now() + timedelta(days=180)]
+        if not near_term.empty:
+            report += f"- Refinance risk: ${near_term['Outstanding'].sum():,.0f} due in 6 months.\n"
+    report += "- Monitor AR overdue and cash projections for shortfalls.\n"
+
+    return report

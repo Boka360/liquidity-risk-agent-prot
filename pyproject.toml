@@ -1,0 +1,40 @@
+[project]
+name = "liquidity_risk_agent"
+version = "0.1.0"
+description = "liquidity_risk_agent using crewAI"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "crewai-tools>=0.71.0",
+    "crewai[tools]>=0.175.0,<1.0.0",
+    "langchain-openai>=0.2.14",
+    "matplotlib>=3.10.6",
+    "openai>=1.107.2",
+    "openpyxl>=3.1.5",
+    "pandas>=2.3.2",
+    "pypdf2>=3.0.1",
+    "python-docx>=1.2.0",
+    "python-dotenv>=1.1.1",
+    "streamlit>=1.49.1",
+    "beautifulsoup4>=4.12.3",
+    "markdown2>=2.5.0",
+    "reportlab>=4.2.2",
+    "scikit-learn>=1.5.2",
+]
+
+[project.scripts]
+liquidity_risk_agent = "liquidity_risk_agent.main:run"
+run_crew = "liquidity_risk_agent.main:run"
+train = "liquidity_risk_agent.main:train"
+replay = "liquidity_risk_agent.main:replay"
+test = "liquidity_risk_agent.main:test"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.crewai]
+type = "crew"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/liquidity_risk_agent"]
